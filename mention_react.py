@@ -1,6 +1,7 @@
 from .. import loader
-from telethon import functions, types
+from telethon import events, functions, types
 import asyncio
+import time
 
 TARGET_USER_ID = 8505890439
 
@@ -12,76 +13,90 @@ TARGET_CHATS = {
 REACTION_EMOJI = "😊"
 REPLY_TEXT = "Oiii"
 
+COOLDOWN = 86400  # 1 dia
+
+
 @loader.tds
 class MentionReactMod(loader.Module):
-    """MentionReact seguro"""
+    """Reage 1x por dia quando o usuário alvo menciona ou responde você."""
 
     strings = {"name": "MentionReact"}
 
     async def client_ready(self, client, db):
         self.client = client
+        self.db = db
         self.me = await client.get_me()
         self.me_id = self.me.id
         self.me_username = (self.me.username or "").lower()
-        self.seen = set()
 
-    async def watcher(self, message):
-        try:
-            if getattr(message, "out", False):
-                return
+        self.last_trigger = self.db.get("MentionReact", "last_trigger", 0)
 
-            if getattr(message, "chat_id", None) not in TARGET_CHATS:
-                return
+        if getattr(self, "_handler_added", False):
+            return
 
-            if getattr(message, "sender_id", None) != TARGET_USER_ID:
-                return
+        self._handler_added = True
 
-            msg_id = getattr(message, "id", None)
-            if not msg_id:
-                return
+        @client.on(events.NewMessage(incoming=True))
+        async def handler(event):
+            try:
+                if event.chat_id not in TARGET_CHATS:
+                    return
 
-            key = f"{message.chat_id}:{msg_id}"
-            if key in self.seen:
-                return
+                if event.sender_id != TARGET_USER_ID:
+                    return
 
-            should_answer = False
+                now = int(time.time())
 
-            if getattr(message, "mentioned", False):
-                should_answer = True
+                if now - self.last_trigger < COOLDOWN:
+                    return
 
-            text = (getattr(message, "raw_text", "") or "").lower()
-            if self.me_username and f"@{self.me_username}" in text:
-                should_answer = True
+                msg = event.message
 
-            if not should_answer and getattr(message, "is_reply", False):
+                should_answer = False
+
+                if getattr(msg, "mentioned", False):
+                    should_answer = True
+
+                text = (getattr(msg, "raw_text", None) or "").lower()
+                if self.me_username and f"@{self.me_username}" in text:
+                    should_answer = True
+
+                if not should_answer and getattr(msg, "is_reply", False):
+                    try:
+                        replied = await msg.get_reply_message()
+                        if replied and (
+                            getattr(replied, "sender_id", None) == self.me_id
+                            or getattr(replied, "out", False)
+                        ):
+                            should_answer = True
+                    except:
+                        pass
+
+                if not should_answer:
+                    return
+
+                await asyncio.sleep(0.4)
+
                 try:
-                    replied = await message.get_reply_message()
-                    if replied and (
-                        getattr(replied, "sender_id", None) == self.me_id
-                        or getattr(replied, "out", False)
-                    ):
-                        should_answer = True
-                except Exception:
+                    await self.client(
+                        functions.messages.SendReactionRequest(
+                            peer=event.chat_id,
+                            msg_id=msg.id,
+                            reaction=[types.ReactionEmoji(emoticon=REACTION_EMOJI)],
+                            big=False,
+                            add_to_recent=True,
+                        )
+                    )
+                except:
                     pass
 
-            if not should_answer:
-                return
+                try:
+                    await event.reply(REPLY_TEXT)
+                except:
+                    pass
 
-            await asyncio.sleep(0.4)
+                self.last_trigger = now
+                self.db.set("MentionReact", "last_trigger", now)
 
-            try:
-                await self.client(
-                    functions.messages.SendReactionRequest(
-                        peer=message.chat_id,
-                        msg_id=message.id,
-                        reaction=[types.ReactionEmoji(emoticon=REACTION_EMOJI)],
-                    )
-                )
-            except Exception:
-                pass
-
-            await message.reply(REPLY_TEXT)
-            self.seen.add(key)
-
-        except Exception:
-            pass
+            except Exception as e:
+                print("MentionReact erro:", e)
